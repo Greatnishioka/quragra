@@ -7,7 +7,6 @@ class MessageListViewModel: ObservableObject {
     @Published var isLoading = false
     @Published var selectedService: MessageService? = .slack {
         didSet {
-            // Reset channel selection when service changes
             selectedChannel = nil
         }
     }
@@ -47,8 +46,20 @@ class MessageListViewModel: ObservableObject {
         // Sort by timestamp ascending (Oldest first)
         self.messages = allMessages.sorted(by: { $0.timestamp < $1.timestamp })
         
-        // Extract initial channels
-        await updateChannels(from: self.messages)
+        // Fetch Channels explicitly
+        var allChannels: [Channel] = []
+        for (_, service) in services {
+            if let channels = try? await service.fetchChannels() {
+                allChannels.append(contentsOf: channels)
+            }
+        }
+        
+        await MainActor.run {
+            self.channels = allChannels
+        }
+        
+        // Extract initial channels from messages (backup/merge)
+        // await updateChannels(from: self.messages)
         
         // Subscribe to streams
         for (_, service) in services {
@@ -81,7 +92,11 @@ class MessageListViewModel: ObservableObject {
             }
             
             let displayName = name ?? channelId
-            let channel = Channel(id: channelId, name: displayName, service: message.service)
+            let isDM = channelId.starts(with: "D") // Slack DMs start with D
+            
+            print("DEBUG: Discovered channel: \(displayName) (ID: \(channelId), isDM: \(isDM))")
+            
+            let channel = Channel(id: channelId, name: displayName, service: message.service, isDM: isDM)
             
             // Update channels list if needed
             if let index = channels.firstIndex(where: { $0.id == channel.id && $0.service == channel.service }) {
@@ -113,12 +128,51 @@ class MessageListViewModel: ObservableObject {
     
     var filteredChannels: [Channel] {
         guard let service = selectedService else { return [] }
-        return channels.filter { $0.service == service }
+        return channels.filter { $0.service == service && !$0.isDM }
+    }
+    
+    var filteredDMs: [Channel] {
+        guard let service = selectedService else { return [] }
+        return channels.filter { $0.service == service && $0.isDM }
+    }
+    
+    // MARK: - Sending
+    
+    @Published var messageText: String = ""
+    
+    func sendMessage() async {
+        guard let serviceType = selectedService,
+              let channel = selectedChannel,
+              !messageText.isEmpty,
+              let service = services[serviceType] else { return }
+        
+        let textToSend = messageText
+        messageText = "" // Clear input immediately
+        
+        do {
+            try await service.sendMessage(body: textToSend, to: channel.id)
+            // Note: We don't manually append the message here because we expect it to come back via the WebSocket stream
+        } catch {
+            print("Failed to send message: \(error)")
+            // TODO: Restore text or show error
+        }
+    }
+    
+    func uploadFile(url: URL) async {
+        guard let serviceType = selectedService,
+              let channel = selectedChannel,
+              let service = services[serviceType] else { return }
+        
+        do {
+            let data = try Data(contentsOf: url)
+            let filename = url.lastPathComponent
+            let mimetype = "application/octet-stream" // Simplification
+            
+            try await service.uploadFile(data: data, filename: filename, mimetype: mimetype, to: channel.id)
+        } catch {
+            print("Failed to upload file: \(error)")
+        }
     }
 }
 
-struct Channel: Identifiable, Hashable {
-    let id: String
-    let name: String
-    let service: MessageService
-}
+

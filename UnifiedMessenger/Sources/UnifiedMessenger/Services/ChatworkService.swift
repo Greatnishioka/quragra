@@ -1,11 +1,6 @@
 import Foundation
 
-protocol MessengerServiceProtocol {
-    func fetchMessages() async throws -> [UnifiedMessage]
-    func sendMessage(body: String, to roomId: String) async throws
-    var messageStream: AsyncStream<UnifiedMessage> { get }
-    func fetchChannelName(channelId: String) async throws -> String
-}
+
 
 class ChatworkService: MessengerServiceProtocol {
     private let apiToken: String
@@ -45,8 +40,16 @@ class ChatworkService: MessengerServiceProtocol {
         return []
     }
     
+    func fetchChannels() async throws -> [Channel] {
+        return []
+    }
+    
     func sendMessage(body: String, to roomId: String) async throws {
         // TODO: Implement sending
+    }
+    
+    func uploadFile(data: Data, filename: String, mimetype: String, to roomId: String) async throws {
+        // TODO: Implement upload
     }
     
     func fetchChannelName(channelId: String) async throws -> String {

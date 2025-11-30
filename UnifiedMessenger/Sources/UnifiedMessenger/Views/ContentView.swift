@@ -81,23 +81,31 @@ struct ChannelListView: View {
                     
                     ScrollView {
                         VStack(alignment: .leading, spacing: 10) {
-                            ForEach(viewModel.filteredChannels) { channel in
-                                Button(action: {
-                                    viewModel.selectedChannel = channel
-                                }) {
-                                    Text("# \(channel.name)")
-                                        .foregroundColor(.white.opacity(viewModel.selectedChannel?.id == channel.id ? 1.0 : 0.8))
-                                        .padding(.horizontal)
-                                        .padding(.vertical, 8)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .background(
-                                            viewModel.selectedChannel?.id == channel.id
-                                            ? Color.white.opacity(0.3)
-                                            : Color.white.opacity(0.1)
-                                        )
-                                        .cornerRadius(8)
+                            if !viewModel.filteredChannels.isEmpty {
+                                Text("Channels")
+                                    .font(.caption)
+                                    .foregroundColor(.white.opacity(0.6))
+                                    .padding(.horizontal)
+                                
+                                ForEach(viewModel.filteredChannels) { channel in
+                                    ChannelRow(channel: channel, isSelected: viewModel.selectedChannel?.id == channel.id) {
+                                        viewModel.selectedChannel = channel
+                                    }
                                 }
-                                .buttonStyle(PlainButtonStyle())
+                            }
+                            
+                            if !viewModel.filteredDMs.isEmpty {
+                                Text("Direct Messages")
+                                    .font(.caption)
+                                    .foregroundColor(.white.opacity(0.6))
+                                    .padding(.horizontal)
+                                    .padding(.top, 10)
+                                
+                                ForEach(viewModel.filteredDMs) { channel in
+                                    ChannelRow(channel: channel, isSelected: viewModel.selectedChannel?.id == channel.id) {
+                                        viewModel.selectedChannel = channel
+                                    }
+                                }
                             }
                         }
                         .padding()
@@ -111,21 +119,48 @@ struct ChannelListView: View {
         }
     }
     
-    var backgroundColor: Color {
-        switch viewModel.selectedService {
-        case .slack: return Color(red: 0.28, green: 0.65, blue: 0.60).opacity(0.9)
-        case .chatwork: return Color(red: 0.22, green: 0.24, blue: 0.26).opacity(0.9)
-        case .googleChat: return Color(red: 0.93, green: 0.45, blue: 0.25).opacity(0.9)
-        case .none: return Color.gray
+    private func serviceName(for service: MessageService) -> String {
+        switch service {
+        case .slack: return "Slack"
+        case .chatwork: return "ChatWork"
+        case .googleChat: return "Google Chat"
         }
     }
     
-    func serviceName(for service: MessageService) -> String {
-        switch service {
-        case .slack: return "Slack Channels"
-        case .chatwork: return "ChatWork Rooms"
-        case .googleChat: return "Google Spaces"
+    private var backgroundColor: Color {
+        switch viewModel.selectedService {
+        case .slack: return Color(red: 0.2, green: 0.6, blue: 0.5) // Slack Green
+        case .chatwork: return Color(red: 0.8, green: 0.2, blue: 0.2) // Chatwork Red
+        case .googleChat: return Color(red: 0.2, green: 0.6, blue: 0.3) // Google Green
+        case .none: return Color.gray
         }
+    }
+}
+
+struct ChannelRow: View {
+    let channel: Channel
+    let isSelected: Bool
+    let action: () -> Void
+    
+    var body: some View {
+        Button(action: action) {
+            HStack {
+                Image(systemName: channel.isDM ? "person.circle.fill" : "number")
+                    .foregroundColor(.white.opacity(0.7))
+                Text(channel.name)
+                    .foregroundColor(.white.opacity(isSelected ? 1.0 : 0.8))
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                isSelected
+                ? Color.white.opacity(0.3)
+                : Color.white.opacity(0.1)
+            )
+            .cornerRadius(8)
+        }
+        .buttonStyle(PlainButtonStyle())
     }
 }
 
@@ -157,18 +192,61 @@ struct MessageAreaView: View {
             
             // Input Area
             HStack {
-                Image(systemName: "photo")
-                Image(systemName: "paperclip")
-                TextField("Message...", text: .constant(""))
+                Button(action: {
+                    openFilePicker()
+                }) {
+                    Image(systemName: "photo")
+                        .foregroundColor(.gray)
+                }
+                .buttonStyle(PlainButtonStyle())
+                
+                Button(action: {
+                    openFilePicker()
+                }) {
+                    Image(systemName: "paperclip")
+                        .foregroundColor(.gray)
+                }
+                .buttonStyle(PlainButtonStyle())
+                
+                TextField("Message...", text: $viewModel.messageText)
                     .textFieldStyle(.plain)
                     .padding(8)
                     .background(Color.white)
                     .cornerRadius(8)
-                Image(systemName: "paperplane.fill")
-                    .foregroundColor(.blue)
+                    .onSubmit {
+                        Task {
+                            await viewModel.sendMessage()
+                        }
+                    }
+                
+                Button(action: {
+                    Task {
+                        await viewModel.sendMessage()
+                    }
+                }) {
+                    Image(systemName: "paperplane.fill")
+                        .foregroundColor(.blue)
+                }
+                .buttonStyle(PlainButtonStyle())
+                .disabled(viewModel.messageText.isEmpty)
             }
             .padding()
             .background(Color.white)
+        }
+    }
+    
+    private func openFilePicker() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canCreateDirectories = false
+        
+        panel.begin { response in
+            if response == .OK, let url = panel.url {
+                Task {
+                    await viewModel.uploadFile(url: url)
+                }
+            }
         }
     }
 }
@@ -193,11 +271,59 @@ struct MessageBubble: View {
                         .foregroundColor(.gray)
                 }
                 
-                Text(message.body)
-                    .padding(12)
-                    .background(isMe ? Color.blue.opacity(0.1) : Color.white)
-                    .cornerRadius(12)
-                    .shadow(radius: 1)
+                if !message.body.isEmpty {
+                    Text(message.body)
+                        .padding(12)
+                        .background(isMe ? Color.blue.opacity(0.1) : Color.white)
+                        .cornerRadius(12)
+                        .shadow(radius: 1)
+                }
+                
+                // Attachments
+                ForEach(message.attachments, id: \.self) { attachment in
+                    if attachment.type == .image {
+                        if message.service == .slack {
+                            SecureImage(url: attachment.url, token: Secrets.slackBotToken)
+                                .frame(maxWidth: 300, maxHeight: 300)
+                                .cornerRadius(8)
+                        } else {
+                            AsyncImage(url: attachment.url) { phase in
+                                switch phase {
+                                case .empty:
+                                    ProgressView()
+                                case .success(let image):
+                                    image.resizable()
+                                         .aspectRatio(contentMode: .fit)
+                                         .frame(maxWidth: 300, maxHeight: 300)
+                                         .cornerRadius(8)
+                                case .failure:
+                                    Image(systemName: "photo")
+                                        .foregroundColor(.gray)
+                                @unknown default:
+                                    EmptyView()
+                                }
+                            }
+                        }
+                    } else {
+                        // File
+                        HStack {
+                            Image(systemName: "doc.fill")
+                                .foregroundColor(.gray)
+                            Text(attachment.name)
+                                .foregroundColor(.primary)
+                            if let downloadURL = attachment.downloadURL {
+                                Link(destination: downloadURL) {
+                                    Image(systemName: "arrow.down.circle.fill")
+                                        .foregroundColor(.blue)
+                                }
+                            }
+                        }
+                        .padding(8)
+                        .background(Color.white)
+                        .cornerRadius(8)
+                        .shadow(radius: 1)
+                    }
+                }
                 
                 Text(message.timestamp, style: .time)
                     .font(.caption2)
@@ -213,8 +339,69 @@ struct MessageBubble: View {
         }
     }
     
+    private func serviceName(for service: MessageService) -> String {
+        switch service {
+        case .slack: return "Slack"
+        case .chatwork: return "ChatWork"
+        case .googleChat: return "Google Chat"
+        }
+    }
+    
     var isMe: Bool {
         // Mock logic: Assume we are not the sender for now
         return false
+    }
+}
+
+struct SecureImage: View {
+    let url: URL
+    let token: String
+    
+    @State private var image: Image?
+    @State private var isLoading = true
+    
+    var body: some View {
+        Group {
+            if let image = image {
+                image
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+            } else {
+                if isLoading {
+                    ProgressView()
+                        .task {
+                            await loadImage()
+                        }
+                } else {
+                    Image(systemName: "photo")
+                        .foregroundColor(.gray)
+                }
+            }
+        }
+    }
+    
+    private func loadImage() async {
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            
+            if let httpResponse = response as? HTTPURLResponse {
+                print("SecureImage: Status \(httpResponse.statusCode) for \(url.lastPathComponent)")
+            }
+            
+            if let nsImage = NSImage(data: data) {
+                self.image = Image(nsImage: nsImage)
+            } else {
+                print("SecureImage: Failed to decode image data. Data length: \(data.count)")
+                if let errorText = String(data: data, encoding: .utf8) {
+                    print("SecureImage: Response body: \(errorText)")
+                }
+            }
+        } catch {
+            print("Failed to load secure image: \(error)")
+        }
+        isLoading = false
     }
 }

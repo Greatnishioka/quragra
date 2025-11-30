@@ -13,6 +13,19 @@ struct User: Identifiable, Codable, Hashable {
     let service: MessageService
 }
 
+struct Attachment: Codable, Hashable {
+    let id: String
+    let url: URL
+    let type: AttachmentType
+    let name: String
+    let downloadURL: URL?
+}
+
+enum AttachmentType: String, Codable, Hashable {
+    case image
+    case file
+}
+
 struct UnifiedMessage: Identifiable, Codable, Hashable {
     let id: String
     let body: String
@@ -20,6 +33,17 @@ struct UnifiedMessage: Identifiable, Codable, Hashable {
     let timestamp: Date
     let service: MessageService
     let channelName: String?
+    let attachments: [Attachment]
+    
+    init(id: String, body: String, sender: User, timestamp: Date, service: MessageService, channelName: String?, attachments: [Attachment] = []) {
+        self.id = id
+        self.body = body
+        self.sender = sender
+        self.timestamp = timestamp
+        self.service = service
+        self.channelName = channelName
+        self.attachments = attachments
+    }
     
     // Helper for preview
     static let example = UnifiedMessage(
@@ -28,6 +52,7 @@ struct UnifiedMessage: Identifiable, Codable, Hashable {
         sender: User(id: "u1", name: "Alice", avatarURL: nil, service: .slack),
         timestamp: Date(),
         service: .slack,
-        channelName: "general"
+        channelName: "general",
+        attachments: []
     )
 }

@@ -27,8 +27,16 @@ class GoogleChatService: MessengerServiceProtocol {
         ]
     }
     
+    func fetchChannels() async throws -> [Channel] {
+        return []
+    }
+    
     func sendMessage(body: String, to roomId: String) async throws {
         // Mock send
+    }
+    
+    func uploadFile(data: Data, filename: String, mimetype: String, to roomId: String) async throws {
+        // Mock upload
     }
     
     func fetchChannelName(channelId: String) async throws -> String {

@@ -25,6 +25,15 @@ struct SlackEvent: Codable {
     let channel: String?
     let ts: String?
     let subtype: String?
+    let files: [SlackFile]?
+}
+
+struct SlackFile: Codable {
+    let id: String
+    let name: String?
+    let mimetype: String?
+    let url_private: String?
+    let url_private_download: String?
 }
 
 struct SlackChannelResponse: Codable {
@@ -35,7 +44,9 @@ struct SlackChannelResponse: Codable {
 
 struct SlackChannelInfo: Codable {
     let id: String
-    let name: String
+    let name: String? // Name is optional for DMs
+    let is_im: Bool?
+    let user: String? // User ID for DMs
 }
 
 struct SlackConversationsResponse: Codable {
@@ -48,6 +59,18 @@ struct SlackHistoryResponse: Codable {
     let ok: Bool
     let messages: [SlackEvent]?
     let error: String?
+}
+
+struct SlackUserResponse: Codable {
+    let ok: Bool
+    let user: SlackUserInfo?
+    let error: String?
+}
+
+struct SlackUserInfo: Codable {
+    let id: String
+    let real_name: String?
+    let name: String?
 }
 
 // MARK: - Service
@@ -145,9 +168,13 @@ class SlackService: MessengerServiceProtocol, ObservableObject {
             if envelope.type == "events_api",
                let event = envelope.payload?.event,
                event.type == "message",
-               let text = event.text,
                let userId = event.user,
                let ts = event.ts {
+                
+                let text = event.text ?? "" // Text might be empty if it's just a file
+                
+                // Parse attachments
+                let attachments = parseAttachments(from: event.files)
                 
                 // Convert to UnifiedMessage
                 let message = UnifiedMessage(
@@ -156,7 +183,8 @@ class SlackService: MessengerServiceProtocol, ObservableObject {
                     sender: User(id: userId, name: "User \(userId.prefix(4))", avatarURL: nil, service: .slack),
                     timestamp: Date(timeIntervalSince1970: Double(ts) ?? 0),
                     service: .slack,
-                    channelName: event.channel
+                    channelName: event.channel,
+                    attachments: attachments
                 )
                 
                 DispatchQueue.main.async {
@@ -219,11 +247,90 @@ class SlackService: MessengerServiceProtocol, ObservableObject {
         return historyMessages + receivedMessages
     }
     
+    func fetchChannels() async throws -> [Channel] {
+        let slackChannels = try await fetchJoinedChannels()
+        var channels: [Channel] = []
+        
+        for channel in slackChannels {
+            var name = channel.name
+            let isDM = channel.is_im == true
+            
+            if isDM, let userId = channel.user {
+                name = try? await fetchUserName(userId: userId)
+            }
+            
+            channels.append(Channel(
+                id: channel.id,
+                name: name ?? channel.id,
+                service: .slack,
+                isDM: isDM
+            ))
+        }
+        return channels
+    }
+    
     func sendMessage(body: String, to channelId: String) async throws {
-        // Call chat.postMessage
+        guard let url = URL(string: "https://slack.com/api/chat.postMessage") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(botToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        let payload: [String: Any] = [
+            "channel": channelId,
+            "text": body
+        ]
+        
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        
+        let (data, _) = try await session.data(for: request)
+        // Check response if needed
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let ok = json["ok"] as? Bool, !ok {
+            print("Error sending message: \(json)")
+            throw NSError(domain: "SlackService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to send message"])
+        }
+    }
+    
+    func uploadFile(data: Data, filename: String, mimetype: String, to channelId: String) async throws {
+        // Use files.upload (v1) for simplicity
+        guard let url = URL(string: "https://slack.com/api/files.upload") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(botToken)", forHTTPHeaderField: "Authorization")
+        
+        let boundary = UUID().uuidString
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        
+        var body = Data()
+        
+        // channels
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"channels\"\r\n\r\n".data(using: .utf8)!)
+        body.append("\(channelId)\r\n".data(using: .utf8)!)
+        
+        // file
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: \(mimetype)\r\n\r\n".data(using: .utf8)!)
+        body.append(data)
+        body.append("\r\n".data(using: .utf8)!)
+        
+        body.append("--\(boundary)--\r\n".data(using: .utf8)!)
+        
+        request.httpBody = body
+        
+        let (responseData, _) = try await session.data(for: request)
+        
+        if let json = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+           let ok = json["ok"] as? Bool, !ok {
+            print("Error uploading file: \(json)")
+            throw NSError(domain: "SlackService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to upload file"])
+        }
     }
     
     func fetchChannelName(channelId: String) async throws -> String {
+        // 1. Try conversations.info
         guard let url = URL(string: "https://slack.com/api/conversations.info?channel=\(channelId)") else { return channelId }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
@@ -232,16 +339,33 @@ class SlackService: MessengerServiceProtocol, ObservableObject {
         let (data, _) = try await session.data(for: request)
         let response = try JSONDecoder().decode(SlackChannelResponse.self, from: data)
         
-        if let name = response.channel?.name {
-            return name
-        } else {
-            print("Error fetching channel name for \(channelId): \(response.error ?? "Unknown")")
-            return channelId
+        if let channel = response.channel {
+            if let name = channel.name {
+                return name
+            } else if channel.is_im == true, let userId = channel.user {
+                // It's a DM, fetch user name
+                return try await fetchUserName(userId: userId)
+            }
         }
+        
+        print("Error fetching channel name for \(channelId): \(response.error ?? "Unknown")")
+        return channelId
+    }
+    
+    private func fetchUserName(userId: String) async throws -> String {
+        guard let url = URL(string: "https://slack.com/api/users.info?user=\(userId)") else { return userId }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(botToken)", forHTTPHeaderField: "Authorization")
+        
+        let (data, _) = try await session.data(for: request)
+        let response = try JSONDecoder().decode(SlackUserResponse.self, from: data)
+        
+        return response.user?.real_name ?? response.user?.name ?? userId
     }
     
     private func fetchJoinedChannels() async throws -> [SlackChannelInfo] {
-        guard let url = URL(string: "https://slack.com/api/users.conversations?types=public_channel,private_channel") else { return [] }
+        guard let url = URL(string: "https://slack.com/api/users.conversations?types=public_channel,private_channel,im&limit=100") else { return [] }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.setValue("Bearer \(botToken)", forHTTPHeaderField: "Authorization")
@@ -250,6 +374,7 @@ class SlackService: MessengerServiceProtocol, ObservableObject {
         let response = try JSONDecoder().decode(SlackConversationsResponse.self, from: data)
         
         if let channels = response.channels {
+            print("DEBUG: Fetched \(channels.count) channels. IDs: \(channels.map { "\($0.id) (is_im: \($0.is_im ?? false))" })")
             return channels
         } else {
             print("Error fetching joined channels: \(response.error ?? "Unknown")")
@@ -272,7 +397,11 @@ class SlackService: MessengerServiceProtocol, ObservableObject {
         }
         
         return events.compactMap { event in
-            guard let text = event.text, let userId = event.user, let ts = event.ts else { return nil }
+            guard let userId = event.user, let ts = event.ts else { return nil }
+            let text = event.text ?? ""
+            
+            // Parse attachments
+            let attachments = parseAttachments(from: event.files)
             
             return UnifiedMessage(
                 id: ts,
@@ -280,7 +409,27 @@ class SlackService: MessengerServiceProtocol, ObservableObject {
                 sender: User(id: userId, name: "User \(userId.prefix(4))", avatarURL: nil, service: .slack),
                 timestamp: Date(timeIntervalSince1970: Double(ts) ?? 0),
                 service: .slack,
-                channelName: channelId // History messages don't have channel inside, so use the requested ID
+                channelName: channelId,
+                attachments: attachments
+            )
+        }
+    }
+    
+    private func parseAttachments(from files: [SlackFile]?) -> [Attachment] {
+        guard let files = files else { return [] }
+        
+        return files.compactMap { file in
+            guard let urlString = file.url_private, let url = URL(string: urlString) else { return nil }
+            let downloadURL = file.url_private_download.flatMap { URL(string: $0) }
+            
+            let type: AttachmentType = (file.mimetype?.hasPrefix("image/") ?? false) ? .image : .file
+            
+            return Attachment(
+                id: file.id,
+                url: url,
+                type: type,
+                name: file.name ?? "File",
+                downloadURL: downloadURL
             )
         }
     }
